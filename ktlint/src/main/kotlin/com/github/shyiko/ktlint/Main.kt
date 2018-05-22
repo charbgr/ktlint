@@ -10,6 +10,7 @@ import com.github.shyiko.ktlint.core.RuleExecutionException
 import com.github.shyiko.ktlint.core.RuleSet
 import com.github.shyiko.ktlint.core.RuleSetProvider
 import com.github.shyiko.ktlint.internal.EditorConfig
+import com.github.shyiko.ktlint.internal.EditorConfigFinder
 import com.github.shyiko.ktlint.internal.IntellijIDEAIntegration
 import com.github.shyiko.ktlint.internal.MavenDependencyResolver
 import com.github.shyiko.ktlint.test.DumpAST
@@ -138,11 +139,11 @@ object Main {
 
     @Option(names = arrayOf("--reporter"), description = arrayOf(
         "A reporter to use (built-in: plain (default), plain?group_by_file, json, checkstyle). " +
-        "To use a third-party reporter specify either a path to a JAR file on the filesystem or a" +
-        "<groupId>:<artifactId>:<version> triple pointing to a remote artifact (in which case ktlint will first " +
-        "check local cache (~/.m2/repository) and then, if not found, attempt downloading it from " +
-        "Maven Central/JCenter/JitPack/user-provided repository)\n" +
-        "e.g. \"html,artifact=com.github.username:ktlint-reporter-html:master-SNAPSHOT\""
+            "To use a third-party reporter specify either a path to a JAR file on the filesystem or a" +
+            "<groupId>:<artifactId>:<version> triple pointing to a remote artifact (in which case ktlint will first " +
+            "check local cache (~/.m2/repository) and then, if not found, attempt downloading it from " +
+            "Maven Central/JCenter/JitPack/user-provided repository)\n" +
+            "e.g. \"html,artifact=com.github.username:ktlint-reporter-html:master-SNAPSHOT\""
     ))
     private var reporters = ArrayList<String>()
 
@@ -163,9 +164,9 @@ object Main {
 
     @Option(names = arrayOf("--ruleset", "-R"), description = arrayOf(
         "A path to a JAR file containing additional ruleset(s) or a " +
-        "<groupId>:<artifactId>:<version> triple pointing to a remote artifact (in which case ktlint will first " +
-        "check local cache (~/.m2/repository) and then, if not found, attempt downloading it from " +
-        "Maven Central/JCenter/JitPack/user-provided repository)"
+            "<groupId>:<artifactId>:<version> triple pointing to a remote artifact (in which case ktlint will first " +
+            "check local cache (~/.m2/repository) and then, if not found, attempt downloading it from " +
+            "Maven Central/JCenter/JitPack/user-provided repository)"
     ))
     private var rulesets = ArrayList<String>()
 
@@ -192,6 +193,7 @@ object Main {
 
     private val workDir = File(".").canonicalPath
     private fun File.location() = if (relative) this.toRelativeString(File(workDir)) else this.path
+    private val editConfigFinder = EditorConfigFinder(workDir, true)
 
     private fun usage() =
         ByteArrayOutputStream()
@@ -260,27 +262,19 @@ object Main {
             ruleSetProviders.forEach { System.err.println("[DEBUG] Discovered ruleset \"${it.first}\"") }
         }
         val reporter = loadReporter(dependencyResolver)
-        // load .editorconfig
-        val userData = (
-            EditorConfig.of(workDir)
-                ?.also { editorConfig ->
-                    if (debug) {
-                        System.err.println("[DEBUG] Discovered .editorconfig (${
-                            generateSequence(editorConfig) { it.parent }.map { it.path.parent.toFile().location() }.joinToString()
-                        })")
-                        System.err.println("[DEBUG] ${editorConfig.mapKeys { it.key }} loaded from .editorconfig")
-                    }
-                }
-                ?: emptyMap<String, String>()
-            ) + mapOf("android" to android.toString())
+        val userData = mapOf("android" to android.toString())
+
         val tripped = AtomicBoolean()
+
         data class LintErrorWithCorrectionInfo(val err: LintError, val corrected: Boolean)
+
         fun process(fileName: String, fileContent: String): List<LintErrorWithCorrectionInfo> {
             if (debug) {
                 System.err.println("[DEBUG] Checking ${if (fileName != "<text>") File(fileName).location() else fileName}")
             }
+            val editorConfig = editConfigFinder.getEditorConfig(fileName)
             val result = ArrayList<LintErrorWithCorrectionInfo>()
-            val localUserData = if (fileName != "<text>") userData + ("file_path" to fileName) else userData
+            val localUserData = editorConfig.safe() + if (fileName != "<text>") userData + ("file_path" to fileName) else userData
             if (format) {
                 val formattedFileContent = try {
                     format(fileName, fileContent, ruleSetProviders.map { it.second.get() }, localUserData) { err, corrected ->
@@ -337,7 +331,7 @@ object Main {
         reporter.afterAll()
         if (debug) {
             System.err.println("[DEBUG] ${
-                System.currentTimeMillis() - start
+            System.currentTimeMillis() - start
             }ms / $fileNumber file(s) / $errorNumber error(s)")
         }
         if (tripped.get()) {
@@ -350,12 +344,13 @@ object Main {
         // (note that version reported by the fallback might not be null if META-INF/MANIFEST.MF is
         // loaded from another JAR on the classpath (e.g. if META-INF/MANIFEST.MF wasn't created as part of the build))
         ?: javaClass.getResourceAsStream("/META-INF/MANIFEST.MF")
-            ?.let { stream ->
-                Manifest(stream).mainAttributes.getValue("Implementation-Version")
-            }
+        ?.let { stream ->
+            Manifest(stream).mainAttributes.getValue("Implementation-Version")
+        }
 
     private fun loadReporter(dependencyResolver: Lazy<MavenDependencyResolver>): Reporter {
         data class ReporterTemplate(val id: String, val artifact: String?, val config: Map<String, String>, var output: String?)
+
         val tpls = (if (reporters.isEmpty()) listOf("plain") else reporters)
             .map { reporter ->
                 val split = reporter.split(",")
@@ -384,7 +379,7 @@ object Main {
             val reporterProvider = reporterProviderById[id]
             if (reporterProvider == null) {
                 System.err.println("Error: reporter \"$id\" wasn't found (available: ${
-                    reporterProviderById.keys.sorted().joinToString(",")
+                reporterProviderById.keys.sorted().joinToString(",")
                 })")
                 exitProcess(1)
             }
@@ -475,7 +470,11 @@ object Main {
         val expectedPreCommitHook = ClassLoader.getSystemClassLoader()
             .getResourceAsStream("ktlint-git-pre-commit-hook${if (android) "-android" else ""}.sh").readBytes()
         // backup existing hook (if any)
-        val actualPreCommitHook = try { preCommitHookFile.readBytes() } catch (e: FileNotFoundException) { null }
+        val actualPreCommitHook = try {
+            preCommitHookFile.readBytes()
+        } catch (e: FileNotFoundException) {
+            null
+        }
         if (actualPreCommitHook != null && !actualPreCommitHook.isEmpty() && !Arrays.equals(actualPreCommitHook, expectedPreCommitHook)) {
             val backupFile = File(hooksDir, "pre-commit.ktlint-backup." + hex(actualPreCommitHook))
             System.err.println(".git/hooks/pre-commit -> $backupFile")
@@ -498,8 +497,12 @@ object Main {
                     "(in future, use -y flag if you wish to skip confirmation)")
                 val scanner = Scanner(System.`in`)
                 val res = generateSequence {
-                        try { scanner.next() } catch (e: NoSuchElementException) { null }
+                    try {
+                        scanner.next()
+                    } catch (e: NoSuchElementException) {
+                        null
                     }
+                }
                     .filter { line -> !line.trim().isEmpty() }
                     .first()
                 if (!"y".equals(res, ignoreCase = true)) {
@@ -521,7 +524,7 @@ object Main {
     private fun hex(input: ByteArray) = BigInteger(MessageDigest.getInstance("SHA-256").digest(input)).toString(16)
 
     // a complete solution would be to implement https://www.gnu.org/software/bash/manual/html_node/Tilde-Expansion.html
-    // this implementation takes care only of the most commonly used case (~/)
+// this implementation takes care only of the most commonly used case (~/)
     private fun expandTilde(path: String) = path.replaceFirst(Regex("^~"), System.getProperty("user.home"))
 
     private fun <T> List<T>.head(limit: Int) = if (limit == size) this else this.subList(0, limit)
@@ -544,8 +547,10 @@ object Main {
                     "jitpack", "default", "http://jitpack.io").build()
             ) + repositories.map { repository ->
                 val colon = repository.indexOf("=").apply {
-                    if (this == -1) { throw RuntimeException("$repository is not a valid repository entry " +
-                        "(make sure it's provided as <id>=<url>") }
+                    if (this == -1) {
+                        throw RuntimeException("$repository is not a valid repository entry " +
+                            "(make sure it's provided as <id>=<url>")
+                    }
                 }
                 val id = repository.substring(0, colon)
                 val url = repository.substring(colon + 1)
@@ -609,8 +614,10 @@ object Main {
     private fun parseQuery(query: String) = query.split("&")
         .fold(LinkedHashMap<String, String>()) { map, s ->
             if (!s.isEmpty()) {
-                s.split("=", limit = 2).let { e -> map.put(e[0],
-                    URLDecoder.decode(e.getOrElse(1) { "true" }, "UTF-8")) }
+                s.split("=", limit = 2).let { e ->
+                    map.put(e[0],
+                        URLDecoder.decode(e.getOrElse(1) { "true" }, "UTF-8"))
+                }
             }
             map
         }
@@ -654,11 +661,25 @@ object Main {
         val q = ArrayBlockingQueue<Future<T>>(numberOfThreads)
         val pill = object : Future<T> {
 
-            override fun isDone(): Boolean { throw UnsupportedOperationException() }
-            override fun get(timeout: Long, unit: TimeUnit): T { throw UnsupportedOperationException() }
-            override fun get(): T { throw UnsupportedOperationException() }
-            override fun cancel(mayInterruptIfRunning: Boolean): Boolean { throw UnsupportedOperationException() }
-            override fun isCancelled(): Boolean { throw UnsupportedOperationException() }
+            override fun isDone(): Boolean {
+                throw UnsupportedOperationException()
+            }
+
+            override fun get(timeout: Long, unit: TimeUnit): T {
+                throw UnsupportedOperationException()
+            }
+
+            override fun get(): T {
+                throw UnsupportedOperationException()
+            }
+
+            override fun cancel(mayInterruptIfRunning: Boolean): Boolean {
+                throw UnsupportedOperationException()
+            }
+
+            override fun isCancelled(): Boolean {
+                throw UnsupportedOperationException()
+            }
         }
         val consumer = Thread(Runnable {
             while (true) {
@@ -677,5 +698,17 @@ object Main {
         q.put(pill)
         executorService.shutdown()
         consumer.join()
+    }
+
+    private fun EditorConfig?.safe(): Map<String, String> {
+        this ?: return emptyMap()
+
+        if (debug) {
+            System.err.println("[DEBUG] Discovered .editorconfig (${
+            generateSequence(this) { it.parent }.map { it.path.parent.toFile().location() }.joinToString()
+            })")
+            System.err.println("[DEBUG] ${this.mapKeys { it.key }} loaded from " + this.path)
+        }
+        return this
     }
 }
